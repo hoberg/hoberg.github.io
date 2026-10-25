@@ -1,0 +1,210 @@
+<!DOCTYPE HTML>
+<html lang="en-US">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Constellation</title>
+        <style>
+            html, body { margin: 0; height: 100%; overflow: hidden; background: #07080f; color: #cfd3e6;
+                         font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+            canvas { display: block; cursor: crosshair; touch-action: none; }
+            .panel { position: fixed; left: 16px; bottom: 16px; max-width: 300px; padding: 12px 14px;
+                     background: rgba(10, 12, 24, 0.72); border: 1px solid rgba(255, 255, 255, 0.08);
+                     border-radius: 10px; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+            .panel h1 { margin: 0 0 6px; font-size: 15px; font-weight: 600; color: #fff; }
+            .panel p { margin: 0 0 6px; }
+            .panel p:last-child { margin: 0; }
+            kbd { font: 12px ui-monospace, Menlo, monospace; padding: 0 5px; border: 1px solid rgba(255, 255, 255, 0.25); border-radius: 4px; }
+            a { color: #8fb8ff; }
+            .count { position: fixed; right: 16px; top: 16px; font: 12px ui-monospace, Menlo, monospace; opacity: 0.55; }
+        </style>
+    </head>
+    <body>
+        <canvas id="sky"></canvas>
+        <div class="count" id="count"></div>
+        <div class="panel">
+            <h1>Constellation</h1>
+            <p>Stars drift under a d3 force simulation; a Delaunay mesh links near neighbors, brighter the closer they are.</p>
+            <p>Move to push stars away (hold <kbd>Shift</kbd> to pull). Click to ignite new stars. <kbd>G</kbd> galaxy mode &middot; <kbd>R</kbd> scatter.</p>
+            <p><a href="/">&larr; back</a></p>
+        </div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+        <script>
+            const canvas = document.getElementById("sky");
+            const ctx = canvas.getContext("2d");
+            const countEl = document.getElementById("count");
+            const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+            let W, H;
+            function resize() {
+                const dpr = window.devicePixelRatio || 1;
+                W = innerWidth;
+                H = innerHeight;
+                canvas.width = W * dpr;
+                canvas.height = H * dpr;
+                canvas.style.width = W + "px";
+                canvas.style.height = H + "px";
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                ctx.fillStyle = "#07080f";
+                ctx.fillRect(0, 0, W, H);
+            }
+            resize();
+
+            const BASE_COUNT = Math.round(Math.min(260, Math.max(90, (W * H) / 6000)));
+            const MAX_COUNT = BASE_COUNT * 2.5;
+            const LINK_DISTANCE = 110;
+            const POINTER_RADIUS = 140;
+
+            // Slow stars are deep blue, fast ones burn white-gold.
+            const starColor = d3.scaleSequential(d3.interpolateRgbBasis(["#3b4cc0", "#7aa2ff", "#d6f1ff", "#fff1b8"]))
+                .domain([0, 5])
+                .clamp(true);
+
+            function makeStar(x, y, vx = 0, vy = 0) {
+                return { x, y, vx, vy, r: 0.8 + Math.random() * 2.2, phase: Math.random() * Math.PI * 2 };
+            }
+
+            let stars = d3.range(BASE_COUNT).map(() => makeStar(Math.random() * W, Math.random() * H));
+            const pointer = { x: 0, y: 0, active: false, attract: false };
+            let galaxy = false;
+            let t = 0;
+
+            // Custom forces: a gentle per-star wander, the pointer push/pull, and an optional swirl.
+            function forceWander() {
+                t += 0.01;
+                const k = reduceMotion ? 0.008 : 0.03;
+                for (const s of stars) {
+                    s.vx += Math.cos(t + s.phase) * k;
+                    s.vy += Math.sin(t * 0.8 + s.phase * 1.3) * k;
+                }
+            }
+
+            function forcePointer() {
+                if (!pointer.active) return;
+                const strength = pointer.attract ? -0.9 : 1.8;
+                for (const s of stars) {
+                    const dx = s.x - pointer.x, dy = s.y - pointer.y;
+                    const d = Math.hypot(dx, dy);
+                    if (d > 1 && d < POINTER_RADIUS) {
+                        const k = (1 - d / POINTER_RADIUS) * strength;
+                        s.vx += (dx / d) * k;
+                        s.vy += (dy / d) * k;
+                    }
+                }
+            }
+
+            function forceGalaxy() {
+                if (!galaxy) return;
+                const cx = W / 2, cy = H / 2;
+                for (const s of stars) {
+                    const dx = s.x - cx, dy = s.y - cy;
+                    const d = Math.hypot(dx, dy) + 1;
+                    s.vx += (-dy / d) * 0.09 - dx * 0.0005;
+                    s.vy += (dx / d) * 0.09 - dy * 0.0005;
+                }
+            }
+
+            const sim = d3.forceSimulation(stars)
+                .alpha(0.3)
+                .alphaDecay(0)
+                .velocityDecay(reduceMotion ? 0.35 : 0.12)
+                .force("charge", d3.forceManyBody().strength(-6).distanceMax(80))
+                .force("collide", d3.forceCollide(s => s.r + 2))
+                .force("wander", forceWander)
+                .force("pointer", forcePointer)
+                .force("galaxy", forceGalaxy)
+                .on("tick", draw);
+
+            function draw() {
+                // Wrap stars around the edges so the sky never empties.
+                for (const s of stars) {
+                    if (s.x < -20) s.x += W + 40; else if (s.x > W + 20) s.x -= W + 40;
+                    if (s.y < -20) s.y += H + 40; else if (s.y > H + 20) s.y -= H + 40;
+                }
+
+                // Fade the previous frame instead of clearing it, leaving faint trails.
+                ctx.globalCompositeOperation = "source-over";
+                ctx.fillStyle = reduceMotion ? "#07080f" : "rgba(7, 8, 15, 0.32)";
+                ctx.fillRect(0, 0, W, H);
+
+                // Draw each Delaunay edge once; long edges (including ones across a wrap) are skipped.
+                const { halfedges, triangles } = d3.Delaunay.from(stars, s => s.x, s => s.y);
+                ctx.lineWidth = 0.7;
+                for (let i = 0; i < halfedges.length; i++) {
+                    const j = halfedges[i];
+                    if (j !== -1 && j < i) continue;
+                    const a = stars[triangles[i]];
+                    const b = stars[triangles[i % 3 === 2 ? i - 2 : i + 1]];
+                    const len = Math.hypot(a.x - b.x, a.y - b.y);
+                    if (len > LINK_DISTANCE) continue;
+                    ctx.strokeStyle = `rgba(140, 170, 255, ${(1 - len / LINK_DISTANCE) * 0.45})`;
+                    ctx.beginPath();
+                    ctx.moveTo(a.x, a.y);
+                    ctx.lineTo(b.x, b.y);
+                    ctx.stroke();
+                }
+
+                ctx.globalCompositeOperation = "lighter";
+                for (const s of stars) {
+                    const c = d3.color(starColor(Math.hypot(s.vx, s.vy)));
+                    c.opacity = 0.18;
+                    ctx.fillStyle = c.formatRgb();
+                    ctx.beginPath();
+                    ctx.arc(s.x, s.y, s.r * 3.2, 0, Math.PI * 2);
+                    ctx.fill();
+                    c.opacity = 1;
+                    ctx.fillStyle = c.formatRgb();
+                    ctx.beginPath();
+                    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                if (pointer.active) {
+                    ctx.globalCompositeOperation = "source-over";
+                    ctx.strokeStyle = pointer.attract ? "rgba(255, 220, 150, 0.25)" : "rgba(140, 170, 255, 0.18)";
+                    ctx.beginPath();
+                    ctx.arc(pointer.x, pointer.y, POINTER_RADIUS, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+
+                countEl.textContent = `${stars.length} stars${galaxy ? " · galaxy" : ""}`;
+            }
+
+            function ignite(x, y) {
+                const burst = d3.range(16).map(i => {
+                    const angle = (i / 16) * Math.PI * 2 + Math.random() * 0.3;
+                    const speed = 3 + Math.random() * 4;
+                    return makeStar(x, y, Math.cos(angle) * speed, Math.sin(angle) * speed);
+                });
+                stars = stars.concat(burst);
+                if (stars.length > MAX_COUNT) stars = stars.slice(stars.length - MAX_COUNT);
+                sim.nodes(stars);
+            }
+
+            function scatter() {
+                for (const s of stars) {
+                    s.x = Math.random() * W;
+                    s.y = Math.random() * H;
+                    s.vx = s.vy = 0;
+                }
+            }
+
+            canvas.addEventListener("pointermove", e => {
+                pointer.x = e.clientX;
+                pointer.y = e.clientY;
+                pointer.attract = e.shiftKey;
+                pointer.active = true;
+            });
+            canvas.addEventListener("pointerleave", () => { pointer.active = false; });
+            canvas.addEventListener("pointerdown", e => ignite(e.clientX, e.clientY));
+            addEventListener("keydown", e => {
+                if (e.key === "Shift") pointer.attract = true;
+                if (e.key === "g" || e.key === "G") galaxy = !galaxy;
+                if (e.key === "r" || e.key === "R") scatter();
+            });
+            addEventListener("keyup", e => { if (e.key === "Shift") pointer.attract = false; });
+            addEventListener("resize", resize);
+        </script>
+    </body>
+</html>
